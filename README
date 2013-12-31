@@ -1,0 +1,15 @@
+! CAUTION !
+
+This software is for my own use.
+You can use this software only if you read all of source codes and
+you should recognize what it is.
+
+
+INSTALLATION
+
+1. git clone https://github.com/hiratara/lambdabot-hipchat-plugins.git
+2. Build lambdabot-hipchat-plugins
+3. git clone https://github.com/mokus0/lambdabot.git
+4. Modify lambdabot/lambdabot.cabal and lambdabot/src/Modules.hs
+   to integrate lambdabot-hipchat-plugin into lambdabot.
+5. Build lambdabot and run it
