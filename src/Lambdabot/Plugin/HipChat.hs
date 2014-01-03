@@ -112,9 +112,9 @@ listenLoop hipconf = do
     loop' :: Session -> LB ()
     loop' sess = do
       mes <- liftIO $ getMessage sess
-      let bodyElems = filter ((== "body") . nameLocalName . elementName) $
-                             (messagePayload mes)
-      when (not $ null bodyElems) $ do
+      let bodyElems = elems "body" mes
+      let delayElems = elems "delay" mes
+      when (null delayElems && (not . null) bodyElems) $ do
         let body = head $ elementText (head bodyElems)
             room = xmppRoom hipconf
         void . fork . void . timeout 15000000 . received $ IrcMessage {
@@ -127,6 +127,8 @@ listenLoop hipconf = do
       return ()
     handleErr :: SomeException -> LB ()
     handleErr = liftIO . print
+    elems tagname mes = filter ((== tagname) . nameLocalName . elementName) $
+                               (messagePayload mes)
 
 xmppListen :: HipConfig -> IO Session
 xmppListen hipconf = do
