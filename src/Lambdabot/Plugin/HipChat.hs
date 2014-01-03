@@ -26,7 +26,7 @@ import Network.Xmpp (
   SessionConfiguration(sessionStreamConfiguration)
   , parseJid, getJid, resourcepart, Session, session, plain
   , Presence(presenceFrom, presenceTo, presencePayload)
-  , sendPresence, getMessage, messageFrom, messagePayload
+  , sendPresence, getMessage, messageFrom, messageTo, messagePayload
   )
 import Data.XML.Types (
   nameLocalName, elementName, elementText
@@ -42,6 +42,9 @@ data HipConfig = HipConfig {
   , xmppPass :: String
   , xmppRoom :: String
   }
+
+ircNick :: HipConfig -> String
+ircNick hipconf = xmppNick hipconf
 
 hipChatPlugin :: Module ()
 hipChatPlugin = newModule
@@ -113,6 +116,7 @@ listenLoop hipconf = do
     loop' sess = do
       mes <- liftIO $ getMessage sess
       let from = maybe "(anybody)" unpack (resourcepart =<< messageFrom mes)
+      let to = maybe "(anybody)" unpack (resourcepart =<< messageTo mes)
       let bodyElems = elems "body" mes
       let delayElems = elems "delay" mes
       when (null delayElems && (not . null) bodyElems) $ do
@@ -120,10 +124,10 @@ listenLoop hipconf = do
             room = xmppRoom hipconf
         void . fork . void . timeout 15000000 . received $ IrcMessage {
           ircMsgServer = room
-          , ircMsgLBName = "lambdabottest"
+          , ircMsgLBName = ircNick hipconf
           , ircMsgPrefix = from
           , ircMsgCommand = "PRIVMSG"
-          , ircMsgParams = [room, ':' : unpack body]
+          , ircMsgParams = [to, ':' : unpack body]
           }
       return ()
     handleErr :: SomeException -> LB ()
