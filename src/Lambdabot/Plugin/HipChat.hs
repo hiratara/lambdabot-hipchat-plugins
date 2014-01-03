@@ -24,9 +24,9 @@ import Control.Monad
 import Data.Default (def)
 import Network.Xmpp (
   SessionConfiguration(sessionStreamConfiguration)
-  , parseJid, getJid, Session, session, plain
+  , parseJid, getJid, resourcepart, Session, session, plain
   , Presence(presenceFrom, presenceTo, presencePayload)
-  , sendPresence, getMessage, messagePayload
+  , sendPresence, getMessage, messageFrom, messagePayload
   )
 import Data.XML.Types (
   nameLocalName, elementName, elementText
@@ -112,6 +112,7 @@ listenLoop hipconf = do
     loop' :: Session -> LB ()
     loop' sess = do
       mes <- liftIO $ getMessage sess
+      let from = maybe "(anybody)" unpack (resourcepart =<< messageFrom mes)
       let bodyElems = elems "body" mes
       let delayElems = elems "delay" mes
       when (null delayElems && (not . null) bodyElems) $ do
@@ -120,7 +121,7 @@ listenLoop hipconf = do
         void . fork . void . timeout 15000000 . received $ IrcMessage {
           ircMsgServer = room
           , ircMsgLBName = "lambdabottest"
-          , ircMsgPrefix = "nobody"
+          , ircMsgPrefix = from
           , ircMsgCommand = "PRIVMSG"
           , ircMsgParams = [room, ':' : unpack body]
           }
