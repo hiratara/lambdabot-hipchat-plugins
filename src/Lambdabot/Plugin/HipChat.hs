@@ -27,6 +27,7 @@ import Network.Xmpp (
   , parseJid, getJid, resourcepart, Session, session, plain
   , Presence(presenceFrom, presenceTo, presencePayload)
   , sendPresence, getMessage, messageFrom, messageTo, messagePayload
+  , reconnectNow, setConnectionClosedHandler
   )
 import Data.XML.Types (
   nameLocalName, elementName, elementText
@@ -110,6 +111,11 @@ sendHipMessage hipconf message = do
 listenLoop :: HipConfig -> LB ()
 listenLoop hipconf = do
   sess <- liftIO $ xmppListen hipconf
+  liftIO $ do
+    setConnectionClosedHandler (\failed _ -> do
+      reconnectNow sess
+      sendMUCPresence hipconf sess
+      ) sess
   forever $ catch (loop' sess) handleErr
   where
     loop' :: Session -> LB ()
@@ -146,6 +152,11 @@ xmppListen hipconf = do
     sess <- case result of
                 Right s -> return s
                 Left e -> error $ "XmppFailure: " ++ (show e)
+    sendMUCPresence hipconf sess
+    return sess
+
+sendMUCPresence :: HipConfig -> Session -> IO ()
+sendMUCPresence hipconf sess = do
     jid <- getJid $ sess
 --    _ <- sendPresence def sess -- Send broad <presence>
     _ <- sendPresence (def {
@@ -153,4 +164,4 @@ xmppListen hipconf = do
            , presenceTo = Just . parseJid $ (xmppRoom hipconf) ++ '/' : (xmppNick hipconf)
            , presencePayload = [Element "x" [(Name "xmlns" Nothing Nothing, [ContentText "http://jabber.org/protocol/muc"])] []]
            }) sess
-    return sess
+    return ()
