@@ -22,11 +22,13 @@ import Network.HTTP.Conduit (
   )
 import Control.Monad
 import Data.Default (def)
+import Data.List (isPrefixOf)
 import Network.Xmpp (
   SessionConfiguration(sessionStreamConfiguration)
-  , parseJid, getJid, resourcepart, Session, session, plain
+  , parseJid, getJid, resourcepart, localpart, Session, session, plain
   , Presence(presenceFrom, presenceTo, presencePayload)
   , sendPresence, getMessage, messageFrom, messageTo, messagePayload
+  , MessageType(..), messageType
   , reconnectNow, setConnectionClosedHandler
   )
 import Data.XML.Types (
@@ -45,7 +47,7 @@ data HipConfig = HipConfig {
   }
 
 ircNick :: HipConfig -> String
-ircNick hipconf = xmppNick hipconf
+ircNick = xmppNick
 
 hipChatPlugin :: Module ()
 hipChatPlugin = newModule
@@ -66,12 +68,11 @@ hipChatPlugin = newModule
         lift $ addServer (xmppRoom hipconf) (sendMessage' hipconf)
         say ("Hello hip. " ++ xs)
       sendMessage' :: HipConfig -> IrcMessage -> LB ()
-      sendMessage' hipconf ircmsg = do
-        let msgs = ircMsgParams ircmsg
-        liftIO $ sendHipMessage hipconf (pack . tail . head . tail $ msgs)
+      sendMessage' hipconf ircmsg =
+        liftIO $ sendHipMessage hipconf ircmsg
 
 parseArgs :: String -> [String]
-parseArgs xs' = skipSpaces xs'
+parseArgs = skipSpaces
   where
     parseArgs' [] = []
     parseArgs' ('"':xs) = let (arg, _:left) = break (== '"') xs
@@ -89,24 +90,32 @@ sendHipMessageJSON m = encode . object $ [
   ("message", String m), ("message_format", "text")
   ]
 
-sendHipMessage :: HipConfig -> Text -> IO ()
-sendHipMessage hipconf message = do
-  let room  = apiRoom hipconf
-      token = apiToken hipconf
-  req' <- parseUrl $ "https://api.hipchat.com/v2/room/" ++ room ++
-                     "/notification?auth_token=" ++ token
-  let req = req' {
-        method = "POST", requestBody = RequestBodyLBS (sendHipMessageJSON message)
-        , requestHeaders = (
-          header ("Content-Type", "application/json") . requestHeaders
-          ) req'
-        , checkStatus = \_ _ _ -> Nothing
-        }
-  _ <- withManager $ httpLbs req
-  return ()
-  where
-    header (h, k) hs = let hs' = filter ((/= h) . fst) hs
-                     in (h, k) : hs'
+sendHipMessage :: HipConfig -> IrcMessage -> IO ()
+sendHipMessage hipconf ircMsg = initRq >>= send where
+  initRq = parseUrl $ url $ head $ ircMsgParams ircMsg
+  url to
+    | to == "none" = concat
+      [ "https://api.hipchat.com/v2/room/"
+      , apiRoom hipconf
+      , "/notification?auth_token="
+      , apiToken hipconf
+      ]
+    | otherwise  = concat
+      [ "https://api.hipchat.com/v2/user/"
+      , drop 1 $ dropWhile (/= '_') to
+      , "/message?auth_token="
+      , apiToken hipconf
+      ]
+  send req' = void $ withManager $ httpLbs (req'
+    { method = "POST"
+    , requestBody = RequestBodyLBS (sendHipMessageJSON message)
+    , requestHeaders = (header ("Content-Type", "application/json") . requestHeaders) req'
+    , checkStatus = \_ _ _ -> Nothing
+    })
+  message = (pack . tail . head . tail . ircMsgParams) ircMsg
+  header (h, k) hs =
+    let hs' = filter ((/= h) . fst) hs
+    in (h, k) : hs'
 
 listenLoop :: HipConfig -> LB ()
 listenLoop hipconf = do
@@ -121,19 +130,28 @@ listenLoop hipconf = do
     loop' :: Session -> LB ()
     loop' sess = do
       mes <- liftIO $ getMessage sess
-      let from = maybe "(anybody)" unpack (resourcepart =<< messageFrom mes)
-      let to = maybe "(anybody)" unpack (resourcepart =<< messageTo mes)
-      let bodyElems = elems "body" mes
-      let delayElems = elems "delay" mes
+      let room = xmppRoom hipconf
+          prefix = case messageType mes of
+            Chat -> maybe "(anybody)" unpack (resourcepart =<< messageTo mes)
+            _ -> maybe "(anybody)" unpack (resourcepart =<< messageFrom mes)
+          param = case messageType mes of
+            Chat ->
+              concat
+                [ room
+                , ":"
+                , (maybe "(anybody)" unpack (localpart =<< messageFrom mes))
+                ]
+            _ -> (maybe "(anybody)" unpack (resourcepart =<< messageTo mes))
+          bodyElems = elems "body" mes
+          delayElems = elems "delay" mes
       when (null delayElems && (not . null) bodyElems) $ do
         let body = head $ elementText (head bodyElems)
-            room = xmppRoom hipconf
         void . fork . void . timeout 15000000 . received $ IrcMessage {
           ircMsgServer = room
           , ircMsgLBName = ircNick hipconf
-          , ircMsgPrefix = from
+          , ircMsgPrefix = prefix
           , ircMsgCommand = "PRIVMSG"
-          , ircMsgParams = [to, ':' : unpack body]
+          , ircMsgParams = [param, ':' : unpack body]
           }
       return ()
     handleErr :: SomeException -> LB ()
