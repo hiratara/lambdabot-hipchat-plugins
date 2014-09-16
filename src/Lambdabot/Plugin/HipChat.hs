@@ -91,10 +91,10 @@ sendHipMessageJSON m = encode . object $ [
   ]
 
 sendHipMessage :: HipConfig -> IrcMessage -> IO ()
-sendHipMessage hipconf ircMsg = initRq >>= send where
+sendHipMessage hipconf ircMsg = putStr "sending message: " >> print ircMsg >> initRq >>= send where
   initRq = parseUrl $ url $ head $ ircMsgParams ircMsg
   url to
-    | to == "none" = concat
+    | "none" `isPrefixOf` to = concat
       [ "https://api.hipchat.com/v2/room/"
       , apiRoom hipconf
       , "/notification?auth_token="
@@ -145,15 +145,17 @@ listenLoop hipconf = do
           bodyElems = elems "body" mes
           delayElems = elems "delay" mes
       when (null delayElems && (not . null) bodyElems) $ do
+        liftIO (putStr "received message: " >> print mes)
         let body = head $ elementText (head bodyElems)
-        void . fork . void . timeout 15000000 . received $ IrcMessage {
-          ircMsgServer = room
-          , ircMsgLBName = ircNick hipconf
-          , ircMsgPrefix = prefix
-          , ircMsgCommand = "PRIVMSG"
-          , ircMsgParams = [param, ':' : unpack body]
-          }
-      return ()
+            ircMsg = IrcMessage
+              { ircMsgServer = room
+              , ircMsgLBName = ircNick hipconf
+              , ircMsgPrefix = prefix
+              , ircMsgCommand = "PRIVMSG"
+              , ircMsgParams = [param, ':' : unpack body]
+              }
+        void . fork . void . timeout 15000000 . received $ ircMsg
+        return ()
     handleErr :: SomeException -> LB ()
     handleErr = liftIO . print
     elems tagname mes = filter ((== tagname) . nameLocalName . elementName) $
