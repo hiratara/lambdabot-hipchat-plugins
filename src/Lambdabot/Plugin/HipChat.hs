@@ -91,7 +91,7 @@ sendHipMessageJSON m = encode . object $ [
   ]
 
 sendHipMessage :: HipConfig -> IrcMessage -> IO ()
-sendHipMessage hipconf ircMsg = putStr "sending message: " >> print ircMsg >> initRq >>= send where
+sendHipMessage hipconf ircMsg = initRq >>= send where
   initRq = parseUrl $ url $ head $ ircMsgParams ircMsg
   url to
     | "none" `isPrefixOf` to = concat
@@ -145,7 +145,6 @@ listenLoop hipconf = do
           bodyElems = elems "body" mes
           delayElems = elems "delay" mes
       when (null delayElems && (not . null) bodyElems) $ do
-        liftIO (putStr "received message: " >> print mes)
         let body = head $ elementText (head bodyElems)
             ircMsg = IrcMessage
               { ircMsgServer = room
