@@ -64,7 +64,7 @@ hipChatPlugin = newModule
       hipCommand xs = do
         let hipconf = let (authToken:room:jUser:jNick:jPass:jRoom:_) = parseArgs xs
                       in HipConfig authToken room jUser jNick jPass jRoom
-        lift . lift . fork $ listenLoop hipconf
+        lift . lift . void . fork $ listenLoop hipconf
         lift $ addServer (xmppRoom hipconf) (sendMessage' hipconf)
         say ("Hello hip. " ++ xs)
       sendMessage' :: HipConfig -> IrcMessage -> LB ()
@@ -120,10 +120,9 @@ sendHipMessage hipconf ircMsg = initRq >>= send where
 listenLoop :: HipConfig -> LB ()
 listenLoop hipconf = do
   sess <- liftIO $ xmppListen hipconf
-  liftIO $ do
-    setConnectionClosedHandler (\failed _ -> do
-      reconnectNow sess
-      sendMUCPresence hipconf sess
+  liftIO $
+    setConnectionClosedHandler (\_ _ ->
+      reconnectNow sess >> sendMUCPresence hipconf sess
       ) sess
   forever $ catch (loop' sess) handleErr
   where
@@ -139,9 +138,9 @@ listenLoop hipconf = do
               concat
                 [ room
                 , ":"
-                , (maybe "(anybody)" unpack (localpart =<< messageFrom mes))
+                , maybe "(anybody)" unpack (localpart =<< messageFrom mes)
                 ]
-            _ -> (maybe "(anybody)" unpack (resourcepart =<< messageTo mes))
+            _ -> maybe "(anybody)" unpack (resourcepart =<< messageTo mes)
           bodyElems = elems "body" mes
           delayElems = elems "delay" mes
       when (null delayElems && (not . null) bodyElems) $ do
@@ -158,29 +157,29 @@ listenLoop hipconf = do
     handleErr :: SomeException -> LB ()
     handleErr = liftIO . print
     elems tagname mes = filter ((== tagname) . nameLocalName . elementName) $
-                               (messagePayload mes)
+                               messagePayload mes
 
 xmppListen :: HipConfig -> IO Session
 xmppListen hipconf = do
     let stconf = def
     result <- session
                  "chat.hipchat.com"
-                  (Just (\_ -> [plain (pack . xmppUser $ hipconf) Nothing (pack . xmppPass $ hipconf)]
+                  (Just (const [plain (pack . xmppUser $ hipconf) Nothing (pack . xmppPass $ hipconf)]
                                , Nothing))
                   def { sessionStreamConfiguration = stconf }
     sess <- case result of
                 Right s -> return s
-                Left e -> error $ "XmppFailure: " ++ (show e)
+                Left e -> error $ "XmppFailure: " ++ show e
     sendMUCPresence hipconf sess
     return sess
 
 sendMUCPresence :: HipConfig -> Session -> IO ()
 sendMUCPresence hipconf sess = do
-    jid <- getJid $ sess
+    jid <- getJid sess
 --    _ <- sendPresence def sess -- Send broad <presence>
     _ <- sendPresence (def {
            presenceFrom = jid
-           , presenceTo = Just . parseJid $ (xmppRoom hipconf) ++ '/' : (xmppNick hipconf)
+           , presenceTo = Just . parseJid $ xmppRoom hipconf ++ '/' : xmppNick hipconf
            , presencePayload = [Element "x" [(Name "xmlns" Nothing Nothing, [ContentText "http://jabber.org/protocol/muc"])] []]
            }) sess
     return ()
