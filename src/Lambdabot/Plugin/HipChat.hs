@@ -9,9 +9,7 @@ import Control.Exception.Lifted
 import Control.Monad hiding (forM_)
 import Control.Monad.IO.Class
 import Control.Monad.Trans
-import Data.Aeson (encode, object)
-import Data.Aeson.Types (Value(String))
-import Data.ByteString.Lazy (ByteString)
+import Data.Aeson (ToJSON(..), (.=), encode, object)
 import Data.Foldable (forM_)
 import Data.List (find)
 import Data.Maybe (fromMaybe)
@@ -46,6 +44,7 @@ data HipState = HipState
   { hipConf :: HipConfig
   , hipSession :: Session
   , hipRooms :: [HipRoom]
+  , ignored :: [String]
   }
 
 type S = Maybe (TVar HipState)
@@ -69,28 +68,44 @@ hipChatPlugin = newModule
         , help = say "hipchat-join <room_id> <xmpp_room>. Join a HipChat room."
         , process = joinRoom
         }
+    , (command "hipchat-ignore")
+        { aliases = []
+        , help = say "hipchat-ignore <xmpp_nick>+. Ignore messages from user."
+        , process = addIgnore
+        }
     ]
   , moduleDefState = return Nothing
   }
 
 connect :: String -> Cmd (ModuleT S LB) ()
-connect xs = do
-  let (authToken:jUser:jNick:jPass:_) = parseArgs xs
-      hipconf = HipConfig authToken jUser jNick jPass
-  v <- liftIO $ hipInit hipconf
-  lift . lift . void . fork $ listenLoop v
-  lift $ addServer (hipchatServer hipconf) (liftIO . sendHipMessage)
-  writeMS $ Just v
+connect xs = case parseArgs xs of
+  (authToken:jUser:jNick:jPass:_) -> do
+    let hipconf = HipConfig authToken jUser jNick jPass
+    v <- liftIO $ hipInit hipconf
+    lift . lift . void . fork $ listenLoop v
+    lift $ addServer (hipchatServer hipconf) (liftIO . sendHipMessage)
+    writeMS $ Just v
+  _ -> say "Not enough parameters!"
 
 joinRoom :: String -> Cmd (ModuleT S LB) ()
-joinRoom xs = do
-  let (roomId:roomName:_) = parseArgs xs
-  readMS >>= \case
-    Just v -> liftIO $ do
-      readTVarIO v >>= \hs -> sendMUCPresence (hipConf hs) (hipSession hs) roomName
-      atomically $ modifyTVar v $ \hs -> hs { hipRooms = HipRoom roomId roomName : hipRooms hs }
-    Nothing ->
-      say "Not connected to HipChat. Use hipchat-connect before trying to join a room."
+joinRoom xs = case parseArgs xs of
+  (roomId:roomName:_) ->
+    readMS >>= \case
+      Just v -> liftIO $ do
+        readTVarIO v >>= \hs -> sendMUCPresence (hipConf hs) (hipSession hs) roomName
+        atomically $ modifyTVar v $ \hs -> hs { hipRooms = HipRoom roomId roomName : hipRooms hs }
+      Nothing ->
+        say "Not connected to HipChat. Use hipchat-connect before trying to join a room."
+  _ -> say "Not enough parameters!"
+
+addIgnore :: String -> Cmd (ModuleT S LB) ()
+addIgnore xs = case parseArgs xs of
+  [] -> say "Not enough parameters!"
+  ns  -> readMS >>= \case
+      Just v -> liftIO $ atomically $
+        modifyTVar v $ \hs -> hs { ignored = ignored hs <> ns }
+      Nothing ->
+        say "Not connected to HipChat. Use hipchat-connect before trying to ignore users."
 
 parseArgs :: String -> [String]
 parseArgs = skipSpaces
@@ -106,21 +121,41 @@ parseArgs = skipSpaces
 hipChatPlugins :: [String]
 hipChatPlugins = ["hipChat"]
 
-sendHipMessageJSON :: Text -> ByteString
-sendHipMessageJSON m = encode . object $ [
-  ("message", String m), ("message_format", "text")
-  ]
+data HipMessage
+  = TextMessage Text
+  | HtmlMessage Text
+
+msgText :: HipMessage -> Text
+msgText m = case m of
+  TextMessage t -> t
+  HtmlMessage t -> t
+
+msgFormat :: HipMessage -> Text
+msgFormat m = case m of
+  TextMessage _ -> "text"
+  HtmlMessage _ -> "html"
+
+instance ToJSON HipMessage where
+  toJSON m = object
+    [ "message" .= msgText m
+    , "message_format" .= msgFormat m
+    ]
+
+hipMessage :: IrcMessage -> HipMessage
+hipMessage ircMsg = case ircMsgParams ircMsg of
+  _:_:html:_ -> HtmlMessage $ pack html
+  _:text:[] -> TextMessage $ pack $ tail text
+  _ -> error "No message"
 
 sendHipMessage :: IrcMessage -> IO ()
 sendHipMessage ircMsg = initRq >>= send where
   initRq = parseUrl $ head $ ircMsgParams ircMsg
   send req' = void $ withManager $ httpLbs (req'
     { method = "POST"
-    , requestBody = RequestBodyLBS (sendHipMessageJSON message)
+    , requestBody = RequestBodyLBS (encode $ hipMessage ircMsg)
     , requestHeaders = (header ("Content-Type", "application/json") . requestHeaders) req'
     , checkStatus = \_ _ _ -> Nothing
     })
-  message = (pack . tail . head . tail . ircMsgParams) ircMsg
   header (h, k) hdrs =
     let hdrs' = filter ((/= h) . fst) hdrs
     in (h, k) : hdrs'
@@ -132,9 +167,9 @@ roomSendUrl hs room = concat
   , "/notification?auth_token="
   , apiToken $ hipConf hs
   ]
+
 lookupRoomId :: HipState -> RoomJid -> Maybe RoomId
 lookupRoomId hs n = apiRoom <$> find (\r -> xmppRoom r == n) (hipRooms hs)
-
 
 userSendUrl :: HipState -> String -> String
 userSendUrl hs to = concat
@@ -147,38 +182,47 @@ userSendUrl hs to = concat
 listenLoop :: TVar HipState -> LB ()
 listenLoop v = forever $ catch loop' handleErr where
   loop' = do
-    sess <- liftIO $ hipSession <$> readTVarIO v
-    mes <- liftIO $ getMessage sess
+    mes <- wait
     hs <- liftIO $ readTVarIO v
-    let bodyElems = elems "body" mes
-        delayElems = elems "delay" mes
-    forM_ (channel hs mes) $ \ch ->
-      when (null delayElems && (not . null) bodyElems) $ do
-        let body = head $ elementText (head bodyElems)
-            srv = hipchatServer $ hipConf hs
-            ircMsg = IrcMessage
-              { ircMsgServer = srv
-              , ircMsgLBName = ircNick $ hipConf hs
-              , ircMsgPrefix = from mes
-              , ircMsgCommand = "PRIVMSG"
-              , ircMsgParams = [ concat [ srv, ":", ch ], ':' : unpack body]
-              }
-        void . fork . void . timeout 15000000 . received $ ircMsg
-  from mes = maybe "(anybody)" unpack (part =<< messageFrom mes) where
+    unless (ignoreMsg mes hs) (rcv mes hs)
+  wait = liftIO $ readTVarIO v >>= getMessage . hipSession
+  ignoreMsg mes hs
+    | not $ null $ elems "delay" mes = True
+    | null $ elems "body" mes = True
+    | otherwise = case messageType mes of
+        Chat -> False
+        _ -> maybe False ((`elem` ignored hs) . unpack) (messageFrom mes >>= resourcepart)
+  handleErr :: SomeException -> LB ()
+  handleErr = liftIO . print
+
+rcv :: Message -> HipState -> LB ()
+rcv mes hs = forM_ channel rcv' where
+  rcv' = void . fork . void . timeout 15000000 . received . ircMsg
+  ircMsg ch =
+    let body = head $ elementText (head $ elems "body" mes)
+        srv = hipchatServer $ hipConf hs
+    in IrcMessage
+      { ircMsgServer = srv
+      , ircMsgLBName = ircNick $ hipConf hs
+      , ircMsgPrefix = from
+      , ircMsgCommand = "PRIVMSG"
+      , ircMsgParams = [ concat [ srv, ":", ch ], ':' : unpack body]
+      }
+  from = maybe "(anybody)" unpack (part =<< messageFrom mes) where
     part = case messageType mes of
       Chat -> localpart
       _ -> resourcepart
-  channel hs mes = case messageType mes of
+  channel = case messageType mes of
     Chat -> userSendUrl hs . unpack <$> (localpart =<< messageFrom mes)
     _    -> roomSendUrl hs . unpack <$> groupChannel where
       groupChannel = do
         jid <- messageFrom mes
         lp <- localpart jid
         return $ mconcat [ lp, "@", domainpart jid ]
-  handleErr :: SomeException -> LB ()
-  handleErr = liftIO . print
-  elems tagname mes = filter byTag $ messagePayload mes where
-    byTag = (== tagname) . nameLocalName . elementName
+
+elems :: Text -> Message -> [Element]
+elems tagname mes = filter byTag $ messagePayload mes where
+  byTag = (== tagname) . nameLocalName . elementName
 
 hipInit :: HipConfig -> IO (TVar HipState)
 hipInit hipconf = do
@@ -192,7 +236,7 @@ hipInit hipconf = do
   sess <- case result of
     Left e -> error $ "XmppFailure: " ++ show e
     Right s -> return s
-  v <- liftIO $ newTVarIO $ HipState hipconf sess []
+  v <- liftIO $ newTVarIO $ HipState hipconf sess [] []
   liftIO $ setConnectionClosedHandler (\_ _ -> reconn v) sess
   return v
 
