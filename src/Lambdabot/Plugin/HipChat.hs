@@ -21,6 +21,7 @@ import Lambdabot.IRC
 import Lambdabot.Module
 import Lambdabot.Monad hiding (send)
 import Lambdabot.State
+import Network (PortID(..))
 import Network.HTTP.Conduit
 import Network.Xmpp hiding (to, message, from, jid)
 import System.Timeout.Lifted (timeout)
@@ -226,13 +227,13 @@ elems tagname mes = filter byTag $ messagePayload mes where
 
 hipInit :: HipConfig -> IO (TVar HipState)
 hipInit hipconf = do
-  let stconf = def
+  let stconf = def { connectionDetails = UseHost "chat.hipchat.com" (PortNumber 5222) }
       user' = pack $ xmppUser hipconf
       pass' = pack $ xmppPass hipconf
   result <- session
     "chat.hipchat.com"
     (Just (const [plain user' Nothing pass'], Nothing))
-    def { sessionStreamConfiguration = stconf }
+    def { sessionStreamConfiguration = stconf } --, enableRoster = False }
   sess <- case result of
     Left e -> error $ "XmppFailure: " ++ show e
     Right s -> return s
