@@ -20,10 +20,15 @@ import Data.Text (Text, pack, unpack)
 import Network.HTTP.Conduit (
   parseUrl, Request(..), RequestBody(RequestBodyLBS), withManager, httpLbs
   )
+import Network.TLS (
+  ClientParams(..), ClientHooks(..), defaultParamsClient, Supported(..)
+  )
+import qualified Network.TLS.Extra as CI
 import Control.Monad
 import Data.Default (def)
 import Network.Xmpp (
   SessionConfiguration(sessionStreamConfiguration)
+  , StreamConfiguration(tlsParams)
   , parseJid, getJid, resourcepart, Session, session, plain
   , Presence(presenceFrom, presenceTo, presencePayload)
   , sendPresence, getMessage, messageFrom, messageTo, messagePayload
@@ -34,6 +39,7 @@ import Data.XML.Types (
   , Element(Element), Name(Name), Content(ContentText)
   )
 import System.Timeout.Lifted (timeout)
+import qualified Data.X509.Validation as XV
 
 data HipConfig = HipConfig {
   apiToken :: String
@@ -141,9 +147,24 @@ listenLoop hipconf = do
     elems tagname mes = filter ((== tagname) . nameLocalName . elementName) $
                                (messagePayload mes)
 
+hipchatDefaultParams :: ClientParams
+hipchatDefaultParams = (defaultParamsClient "chat.hipchat.com" "") {
+  clientSupported = def {
+    supportedCiphers = CI.ciphersuite_strong
+                       ++ [ CI.cipher_AES256_SHA1, CI.cipher_AES128_SHA1]
+    }
+  , clientHooks = def {
+     onServerCertificate = validateDefault'
+     }
+  }
+  where
+    validateDefault' c v s cc = do -- Allow self-signed X.509 cert
+      rs <- XV.validateDefault c v s cc
+      return $ filter (`notElem` [XV.UnknownCA, XV.SelfSigned]) rs
+
 xmppListen :: HipConfig -> IO Session
 xmppListen hipconf = do
-    let stconf = def
+    let stconf = def { tlsParams = hipchatDefaultParams }
     result <- session
                  "chat.hipchat.com"
                   (Just (\_ -> [plain (pack . xmppUser $ hipconf) Nothing (pack . xmppPass $ hipconf)]
